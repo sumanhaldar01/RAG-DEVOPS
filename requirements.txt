@@ -1,0 +1,7 @@
+ollama==0.4.7
+chromadb==0.6.3
+pymupdf==1.25.5
+fastapi==0.115.12
+uvicorn==0.34.2
+python-dotenv==1.1.0
+tiktoken==0.9.0
