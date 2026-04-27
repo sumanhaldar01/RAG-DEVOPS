@@ -28,7 +28,7 @@ A simple local RAG (Retrieval-Augmented Generation) system built to learn how ch
 
 ```bash
 # 1. Pull models
-ollama pull qwen3:4b
+ollama pull qwen3.5:4b
 ollama pull nomic-embed-text
 
 # 2. Install dependencies
