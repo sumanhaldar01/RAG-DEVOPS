@@ -46,7 +46,7 @@ python cli.py
 
 ```
 PDF → chunk → embed → ChromaDB
-Question → embed → similarity search → top chunks → Qwen3:4b → Answer
+Question → embed → similarity search → top chunks → Qwen3.5:4b → Answer
 ```
 Everything runs locally. No API keys. No internet. Your documents stay yours.
 
