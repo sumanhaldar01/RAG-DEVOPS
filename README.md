@@ -18,7 +18,7 @@ A simple local RAG (Retrieval-Augmented Generation) system built to learn how ch
 
 | Layer | Tool |
 |---|---|
-| LLM | `qwen3:4b` via Ollama (local) |
+| LLM | `qwen3.5:4b` via Ollama (local) |
 | Embeddings | `nomic-embed-text` via Ollama |
 | Vector Store | ChromaDB (persistent, on-disk) |
 | PDF Parsing | PyMuPDF |
