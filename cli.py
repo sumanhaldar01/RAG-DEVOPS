@@ -3,7 +3,7 @@ from retriever import retrieve
 from rag_chain import build_context, SYSTEM_PROMPT
 from config import *
 
-print("🤖 DevOps RAG (qwen3.5:4b) | streaming mode")
+print("🤖 DevOps RAG (qwen3.5:4b)")
 print("Type 'quit' to exit\n")
 
 while True:
