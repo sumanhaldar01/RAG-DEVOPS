@@ -3,11 +3,16 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["CHROMA_TELEMETRY"]     = "False"
 import ollama
 import chromadb
+from chromadb.config import Settings
 from config import *
 
 def get_collection():
-    """Same collection getter — reused across files."""
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    client = chromadb.PersistentClient(
+        path=CHROMA_PATH,
+        settings=Settings(
+            anonymized_telemetry=False  # 🔥 THIS is the real fix
+        )
+    )
     return client.get_or_create_collection(
         name="devops_docs",
         metadata={"hnsw:space": "cosine"}
