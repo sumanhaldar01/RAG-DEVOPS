@@ -1,3 +1,6 @@
+import os
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY"]     = "False"
 import ollama
 import chromadb
 from config import *

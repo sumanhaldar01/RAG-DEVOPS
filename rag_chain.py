@@ -1,3 +1,6 @@
+import os
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY"]     = "False"
 import ollama
 from retriever import retrieve
 from config import *

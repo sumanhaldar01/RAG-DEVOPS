@@ -1,181 +1,220 @@
 import os
-import fitz          # PyMuPDF — reads PDF bytes into text
-import ollama        # Ollama Python client
-import chromadb      # Local vector database
-import tiktoken      # Counts tokens (same tokenizer OpenAI uses)
-from config import * # Pull all settings
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY"]     = "False"
 
-# ── STEP A: Load + parse PDFs ─────────────────────────────────────────────
+import fitz
+import ollama
+import chromadb
+import tiktoken
+import time
+from config import *
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+def clear_line():
+    """Overwrite current terminal line — used for progress spinner."""
+    print("\r" + " " * 80 + "\r", end="", flush=True)
+
+def progress(msg: str):
+    """Print inline progress without newline."""
+    print(f"\r  {msg}", end="", flush=True)
+
+# ── Load PDFs ─────────────────────────────────────────────────────────────
 
 def load_pdfs(docs_path: str) -> list[dict]:
-    """
-    Walk docs/ folder, open each PDF, extract raw text per page.
-    Returns list of: {text: str, source: str, page: int}
-    """
     documents = []
+    pdf_files = [f for f in os.listdir(docs_path) if f.endswith(".pdf")]
 
-    # os.listdir → list of filenames in folder
-    for filename in os.listdir(docs_path):
+    if not pdf_files:
+        return []
 
-        # Only process .pdf files, skip .gitkeep etc
-        if not filename.endswith(".pdf"):
-            continue
+    print(f"\n📂 Found {len(pdf_files)} PDF(s):")
+    for filename in pdf_files:
+        print(f"   • {filename}")
 
-        # Build full file path: docs/ + filename.pdf
+    print()
+    for filename in pdf_files:
         filepath = os.path.join(docs_path, filename)
+        try:
+            pdf = fitz.open(filepath)
+            total_pages = len(pdf)
+            loaded = 0
 
-        # fitz.open() → opens PDF, gives page iterator
-        pdf = fitz.open(filepath)
+            for page_num in range(total_pages):
+                # Show per-page progress
+                progress(f"Reading {filename} — page {page_num+1}/{total_pages}")
+                page = pdf[page_num]
+                text = page.get_text("text").strip()
+                if text and len(text) > 30:  # skip near-empty pages
+                    documents.append({
+                        "text":   text,
+                        "source": filename,
+                        "page":   page_num + 1
+                    })
+                    loaded += 1
 
-        # Iterate every page (0-indexed)
-        for page_num in range(len(pdf)):
-            page = pdf[page_num]
+            pdf.close()
+            clear_line()
+            print(f"  ✅ {filename} — {loaded}/{total_pages} pages with text")
 
-            # get_text("text") → extracts plain text from page
-            # strip() → remove leading/trailing whitespace
-            text = page.get_text("text").strip()
-
-            # Skip empty pages (cover images, blank pages)
-            if not text:
-                continue
-
-            # Store chunk metadata alongside text
-            # metadata = WHERE this text came from (for citations!)
-            documents.append({
-                "text":   text,
-                "source": filename,
-                "page":   page_num + 1  # human-readable page number
-            })
-
-        page_count = len(pdf)   # save count BEFORE close
-        pdf.close()
-        print(f"✓ Loaded: {filename} ({page_count} pages)")
+        except Exception as e:
+            clear_line()
+            print(f"  ❌ Failed to read {filename}: {e}")
 
     return documents
 
-
-# ── STEP B: Chunk text into smaller pieces ────────────────────────────────
+# ── Chunk text ────────────────────────────────────────────────────────────
 
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """
-    Split long page text into overlapping token-based chunks.
-    WHY chunk? LLM context window is limited. Smaller = precise retrieval.
-    WHY overlap? Prevents cutting sentences mid-thought.
-    """
-    # tiktoken encodes text → token IDs (integers)
-    # cl100k_base = encoding used by most modern LLMs
     enc = tiktoken.get_encoding("cl100k_base")
-
-    # Encode full text to token list
     tokens = enc.encode(text)
-
     chunks = []
-    start = 0  # sliding window start position
-
+    start = 0
     while start < len(tokens):
-        # Window end = start + chunk_size (or end of tokens)
         end = min(start + chunk_size, len(tokens))
-
-        # Decode token slice back to readable string
         chunk = enc.decode(tokens[start:end])
-        chunks.append(chunk)
-
-        # Move window forward but KEEP overlap tokens
-        # overlap = chunks share context at boundaries
+        if len(chunk.strip()) >= 20:  # skip tiny chunks
+            chunks.append(chunk)
         start += chunk_size - chunk_overlap
-
     return chunks
 
-
-# ── STEP C: Embed chunks via Ollama ───────────────────────────────────────
+# ── Embed ──────────────────────────────────────────────────────────────────
 
 def embed_text(text: str) -> list[float]:
-    """
-    Send text to Ollama nomic-embed-text → get float vector (768 dims).
-    Vector = mathematical fingerprint of meaning.
-    Similar text = similar vectors (close in space).
-    """
-    # ollama.embeddings() calls local Ollama API
-    # model = nomic-embed-text (fast, CPU-friendly)
-    response = ollama.embeddings(
-        model=EMBED_MODEL,
-        prompt=text
-    )
-    # response["embedding"] = list of 768 floats
-    return response["embedding"]
+    try:
+        response = ollama.embeddings(model=EMBED_MODEL, prompt=text)
+        return response["embedding"]
+    except Exception as e:
+        raise RuntimeError(
+            f"Embedding failed. Is Ollama running? "
+            f"Try: ollama pull {EMBED_MODEL}\nError: {e}"
+        )
 
-
-# ── STEP D: Store in ChromaDB ─────────────────────────────────────────────
+# ── ChromaDB collection ───────────────────────────────────────────────────
 
 def get_collection():
-    """
-    Connect to ChromaDB and return (or create) our collection.
-    PersistentClient → saves to disk, survives restarts.
-    """
-    # PersistentClient(path) → reads/writes to ./chroma_db folder
     client = chromadb.PersistentClient(path=CHROMA_PATH)
-
-    # get_or_create_collection → idempotent (safe to call many times)
-    # name = logical bucket for our DevOps doc vectors
-    collection = client.get_or_create_collection(
+    return client.get_or_create_collection(
         name="devops_docs",
-        # cosine similarity = best for semantic text search
         metadata={"hnsw:space": "cosine"}
     )
-    return collection
 
+def get_existing_ids(collection) -> set:
+    """Fetch all stored chunk IDs so we can skip already-ingested content."""
+    try:
+        result = collection.get(include=[])  # only fetch IDs, nothing else
+        return set(result["ids"])
+    except Exception:
+        return set()
 
-# ── MAIN: Wire everything together ────────────────────────────────────────
+# ── Main ingest ────────────────────────────────────────────────────────────
 
 def ingest():
-    print("🚀 Starting ingestion pipeline...")
+    start_time = time.time()
 
-    # Load all PDFs → list of page dicts
+    print("=" * 55)
+    print("  🚀 RAG Ingest Pipeline")
+    print("=" * 55)
+
+    # Step 1: Check Ollama is alive
+    print("\n[1/4] Checking Ollama connection...")
+    try:
+        ollama.embeddings(model=EMBED_MODEL, prompt="test")
+        print(f"  ✅ Ollama OK — model: {EMBED_MODEL}")
+    except Exception as e:
+        print(f"  ❌ Cannot reach Ollama: {e}")
+        print("     Fix: run 'ollama serve' in another terminal")
+        print(f"     Then: ollama pull {EMBED_MODEL}")
+        return
+
+    # Step 2: Load PDFs
+    print(f"\n[2/4] Loading PDFs from '{DOCS_PATH}'...")
     docs = load_pdfs(DOCS_PATH)
 
     if not docs:
-        print("❌ No PDFs found in docs/. Add PDFs and re-run.")
+        print(f"  ❌ No PDFs found in '{DOCS_PATH}'")
+        print("     Drop your .pdf files there and re-run.")
         return
 
-    # Get ChromaDB collection
+    print(f"\n  📄 Total pages with text: {len(docs)}")
+
+    # Step 3: Connect to ChromaDB + check existing
+    print("\n[3/4] Connecting to ChromaDB...")
     collection = get_collection()
+    existing_ids = get_existing_ids(collection)
+    existing_count = len(existing_ids)
+    if existing_count:
+        print(f"  ⚡ {existing_count} chunks already in DB — skipping duplicates")
+    else:
+        print("  📦 Empty DB — ingesting everything fresh")
 
-    chunk_id = 0  # unique ID counter for ChromaDB
+    # Step 4: Chunk + embed + store
+    print(f"\n[4/4] Chunking → Embedding → Storing...")
+    print(f"      chunk_size={CHUNK_SIZE} tokens | overlap={CHUNK_OVERLAP} | top_k={TOP_K}")
+    print()
 
-    for doc in docs:
-        # Split page text → chunks
+    chunk_id      = existing_count   # continue ID numbering from where we left off
+    skipped_pages = 0
+    new_chunks    = 0
+    failed_chunks = 0
+
+    for doc_idx, doc in enumerate(docs):
         chunks = chunk_text(doc["text"], CHUNK_SIZE, CHUNK_OVERLAP)
+        filename_short = doc["source"][:35] + "…" if len(doc["source"]) > 35 else doc["source"]
 
-        for chunk in chunks:
-            # Skip whitespace-only chunks (garbage)
-            if len(chunk.strip()) < 20:
+        for c_idx, chunk in enumerate(chunks):
+            chunk_key = f"chunk_{chunk_id}"
+
+            # Skip if already ingested (idempotent re-runs)
+            if chunk_key in existing_ids:
+                skipped_pages += 1
+                chunk_id += 1
                 continue
 
-            # Embed chunk → vector
-            vector = embed_text(chunk)
-
-            # Add to ChromaDB:
-            # ids       = unique string ID per chunk
-            # embeddings = float vector (for similarity search)
-            # documents  = raw text (returned at query time)
-            # metadatas  = source info (for citations)
-            collection.add(
-                ids=[f"chunk_{chunk_id}"],
-                embeddings=[vector],
-                documents=[chunk],
-                metadatas=[{
-                    "source": doc["source"],
-                    "page":   doc["page"]
-                }]
+            progress(
+                f"[{doc_idx+1}/{len(docs)}] {filename_short} "
+                f"p.{doc['page']} — chunk {c_idx+1}/{len(chunks)} "
+                f"| new:{new_chunks} skip:{skipped_pages} fail:{failed_chunks}"
             )
+
+            try:
+                vector = embed_text(chunk)
+                collection.add(
+                    ids=[chunk_key],
+                    embeddings=[vector],
+                    documents=[chunk],
+                    metadatas=[{
+                        "source": doc["source"],
+                        "page":   doc["page"]
+                    }]
+                )
+                new_chunks += 1
+            except Exception as e:
+                failed_chunks += 1
+                # Don't crash — log and continue
+                clear_line()
+                print(f"  ⚠️  chunk_{chunk_id} failed: {str(e)[:60]}")
 
             chunk_id += 1
 
-        print(f"  ✓ {doc['source']} page {doc['page']} → {len(chunks)} chunks")
+    # Summary
+    elapsed = round(time.time() - start_time, 1)
+    clear_line()
+    print("\n" + "=" * 55)
+    print("  ✅ Ingest complete!")
+    print("=" * 55)
+    print(f"  New chunks stored : {new_chunks}")
+    print(f"  Skipped (exist)   : {skipped_pages}")
+    print(f"  Failed            : {failed_chunks}")
+    print(f"  Total in DB       : {chunk_id}")
+    print(f"  Time elapsed      : {elapsed}s")
+    print("=" * 55)
 
-    print(f"\n✅ Done! {chunk_id} chunks stored in ChromaDB.")
+    if failed_chunks > 0:
+        print(f"\n  ⚠️  {failed_chunks} chunks failed — re-run to retry them")
+    if new_chunks == 0 and skipped_pages > 0:
+        print("\n  ℹ️  Nothing new to ingest. Add new PDFs to docs/ to add knowledge.")
+    print()
 
-
-# Run if called directly: python ingest.py
 if __name__ == "__main__":
     ingest()
